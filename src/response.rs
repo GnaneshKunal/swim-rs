@@ -4,13 +4,13 @@ use std::net::SocketAddr;
 use crate::message::Message;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct Response {
+pub struct Response<T: 'static + Serialize + Clone + std::marker::Send + std::marker::Sync> {
     pub address: SocketAddr,
-    pub message: Message,
+    pub message: Message<T>,
 }
 
-impl Response {
-    pub fn new(address: SocketAddr, message: Message) -> Self {
+impl<T: Serialize + Clone + std::marker::Send + std::marker::Sync> Response<T> {
+    pub fn new(address: SocketAddr, message: Message<T>) -> Self {
         Self { address, message }
     }
 }

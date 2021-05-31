@@ -4,6 +4,13 @@ use gossip_async::gossip::Gossip;
 
 use async_std::channel::unbounded;
 
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize)]
+pub enum EventData {
+    String,
+}
+
 #[async_std::main]
 async fn main() {
     env_logger::init();

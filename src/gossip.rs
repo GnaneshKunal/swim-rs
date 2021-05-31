@@ -9,6 +9,7 @@ use chrono::Utc;
 use log::{debug, error};
 use rand::{seq::IteratorRandom, thread_rng};
 use std::{
+    marker::{Send, Sync},
     net::{SocketAddr, ToSocketAddrs},
     time::Duration,
 };
@@ -16,6 +17,7 @@ use std::{
 use crate::{
     action::Action, bytes_to_msg, event::Event, membership::MembershipList, message::Message,
     response::Response, send_msg, send_msg_to_nodes, suspected_node::SuspectedNodeList, utils,
+    GenericMsgTrait,
 };
 
 #[derive(Debug)]
@@ -91,7 +93,10 @@ impl Gossip {
         self.inner.read().await.get_random_nodes(&[self.address])
     }
 
-    pub async fn start(&self, event_sender: Sender<Event>) -> Result<(), anyhow::Error> {
+    pub async fn start<T: 'static + Send + Sync + GenericMsgTrait>(
+        &self,
+        event_sender: Sender<Event>,
+    ) -> Result<(), anyhow::Error> {
         let (sx, rx) = unbounded();
         // let (event_sender, event_receiver) = unbounded();
 
@@ -103,11 +108,11 @@ impl Gossip {
 
         // `try_join` is better than `join`
         futures::try_join!(
-            gossip_node.transmitter(socket.clone()),
-            gossip_node.receiver(socket.clone(), sx),
-            gossip_node.processor(socket.clone(), rx, event_sender),
-            gossip_node.checker(socket.clone()),
-            gossip_node.membership_syncer(socket.clone())
+            gossip_node.transmitter::<T>(socket.clone()),
+            gossip_node.receiver::<T>(socket.clone(), sx),
+            gossip_node.processor::<T>(socket.clone(), rx, event_sender),
+            gossip_node.checker::<T>(socket.clone()),
+            gossip_node.membership_syncer::<T>(socket.clone())
         )?;
 
         println!("HERE");
@@ -115,10 +120,10 @@ impl Gossip {
         // Ok(event_receiver)
     }
 
-    pub async fn receiver(
+    pub async fn receiver<T: Send + Sync + GenericMsgTrait>(
         &self,
         socket: Arc<RwLock<UdpSocket>>,
-        sx: Sender<Response>,
+        sx: Sender<Response<T>>,
     ) -> Result<(), anyhow::Error> {
         task::spawn({
             let socket = socket.clone();
@@ -126,9 +131,8 @@ impl Gossip {
             debug!("Starting receiver...");
 
             async move {
-                let mut buf = vec![0u8; 1024];
-
                 loop {
+                    let mut buf = vec![0u8; 1024];
                     let response = async_std::future::timeout(
                         Duration::from_millis(5),
                         socket.write().await.recv_from(&mut buf),
@@ -138,6 +142,7 @@ impl Gossip {
                     match response {
                         Ok(response) => match response {
                             Ok((_, peer)) => {
+                                // let v = buf.to_vec();
                                 let msg = bytes_to_msg(&buf);
 
                                 // send to inbox
@@ -155,7 +160,10 @@ impl Gossip {
         Ok(())
     }
 
-    pub async fn checker(&self, socket: Arc<RwLock<UdpSocket>>) -> Result<(), anyhow::Error> {
+    pub async fn checker<T: 'static + Send + Sync + GenericMsgTrait>(
+        &self,
+        socket: Arc<RwLock<UdpSocket>>,
+    ) -> Result<(), anyhow::Error> {
         task::spawn({
             let socket = socket.clone();
             let gossip_node = self.inner.clone();
@@ -177,14 +185,14 @@ impl Gossip {
                             send_msg_to_nodes(
                                 socket.clone(),
                                 &gossip_node.read().await.get_random_nodes(&[node]),
-                                Message::new(Action::Dead(node)),
+                                Message::new(Action::<T>::Dead(node)),
                             )
                             .await?;
                         } else if node_timestamp_difference > 20 {
                             send_msg_to_nodes(
                                 socket.clone(),
                                 &gossip_node.read().await.get_random_nodes(&[node]),
-                                Message::new(Action::DeclaredDead(node)),
+                                Message::new(Action::<T>::DeclaredDead(node)),
                             )
                             .await?;
                         }
@@ -213,7 +221,10 @@ impl Gossip {
         self.inner.read().await.members.clone()
     }
 
-    pub async fn transmitter(&self, socket: Arc<RwLock<UdpSocket>>) -> Result<(), anyhow::Error> {
+    pub async fn transmitter<T: 'static + Send + Sync + GenericMsgTrait>(
+        &self,
+        socket: Arc<RwLock<UdpSocket>>,
+    ) -> Result<(), anyhow::Error> {
         task::spawn({
             let gossip_node = self.inner.clone();
             let socket = socket.clone();
@@ -232,7 +243,7 @@ impl Gossip {
                         .map(|a| a.clone())
                         .collect();
 
-                    send_msg_to_nodes(socket.clone(), &to_nodes, Message::new(Action::Ping))
+                    send_msg_to_nodes(socket.clone(), &to_nodes, Message::new(Action::<T>::Ping))
                         .await?;
 
                     task::sleep(Duration::from_secs(5)).await;
@@ -253,7 +264,7 @@ impl Gossip {
                                 send_msg_to_nodes(
                                     socket.clone(),
                                     &gossip_node.read().await.get_random_nodes(&[*to_node]),
-                                    Message::new(Action::PingAddress(to_node.clone())),
+                                    Message::new(Action::<T>::PingAddress(to_node.clone())),
                                 )
                                 .await?;
                             }
@@ -267,7 +278,7 @@ impl Gossip {
         Ok(())
     }
 
-    pub async fn membership_syncer(
+    pub async fn membership_syncer<T: 'static + Send + Sync + GenericMsgTrait>(
         &self,
         socket: Arc<RwLock<UdpSocket>>,
     ) -> Result<(), anyhow::Error> {
@@ -284,7 +295,7 @@ impl Gossip {
                     send_msg_to_nodes(
                         socket.clone(),
                         &gossip_node.read().await.get_random_nodes(&[address]),
-                        Message::new(Action::RequestMembershipList),
+                        Message::new(Action::<T>::RequestMembershipList),
                     )
                     .await?;
 
@@ -300,10 +311,10 @@ impl Gossip {
         Ok(())
     }
 
-    pub async fn processor(
+    pub async fn processor<T: Send + Sync + GenericMsgTrait>(
         &self,
         socket: Arc<RwLock<UdpSocket>>,
-        rx: Receiver<Response>,
+        rx: Receiver<Response<T>>,
         event_sender: Sender<Event>,
     ) -> Result<(), anyhow::Error> {
         task::spawn({
@@ -336,11 +347,12 @@ impl Gossip {
                                     .touch(&from_address, message.timestamp);
 
                                 match message.action {
+                                    Action::Data(x) => println!("Data: {:?}", x),
                                     Action::Ping => {
                                         send_msg(
                                             socket.clone(),
                                             from_address,
-                                            Message::new(Action::Pong),
+                                            Message::new(Action::<T>::Pong),
                                         )
                                         .await?;
                                     }
@@ -363,7 +375,7 @@ impl Gossip {
                                                     send_msg(
                                                         socket.clone(),
                                                         *node,
-                                                        Message::new(Action::PongFrom(
+                                                        Message::new(Action::<T>::PongFrom(
                                                             from_address,
                                                             message.timestamp,
                                                         )),
@@ -392,7 +404,7 @@ impl Gossip {
                                         send_msg(
                                             socket.clone(),
                                             suspected_node_address,
-                                            Message::new(Action::Ping),
+                                            Message::new(Action::<T>::Ping),
                                         )
                                         .await?;
                                     }
@@ -404,7 +416,10 @@ impl Gossip {
                                             send_msg(
                                                 socket.clone(),
                                                 from_address,
-                                                Message::new(Action::NotDead(address, Utc::now())),
+                                                Message::new(Action::<T>::NotDead(
+                                                    address,
+                                                    Utc::now(),
+                                                )),
                                             )
                                             .await?;
                                         } else {
@@ -433,7 +448,7 @@ impl Gossip {
                                         send_msg(
                                             socket.clone(),
                                             from_address,
-                                            Message::new(Action::MembershipList(nodes)),
+                                            Message::new(Action::<T>::MembershipList(nodes)),
                                         )
                                         .await?;
                                     }
@@ -538,7 +553,7 @@ impl Gossip {
                                                     send_msg(
                                                         socket.clone(),
                                                         *node,
-                                                        Message::new(Action::PongFrom(
+                                                        Message::new(Action::<T>::PongFrom(
                                                             from_address,
                                                             message.timestamp,
                                                         )),
