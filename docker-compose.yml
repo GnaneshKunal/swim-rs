@@ -1,0 +1,33 @@
+version: "3.4"
+
+services:
+  db1:
+    image: gossip-async:latest
+    command: 0.0.0.0 db2 db3 db4
+    environment:
+      - ASYNC_STD_THREAD_COUNT=8
+      # - RUST_LOG=debug
+  db2:
+    image: gossip-async:latest
+    command: 0.0.0.0 db1 db3 db4
+    environment:
+      - ASYNC_STD_THREAD_COUNT=8
+      # - RUST_LOG=debug
+  db3:
+    image: gossip-async:latest
+    command: 0.0.0.0 db2 db1 db4
+    environment:
+      - ASYNC_STD_THREAD_COUNT=8
+      # - RUST_LOG=debug
+  db4:
+    image: gossip-async:latest
+    command: 0.0.0.0 db2 db3 db1
+    environment:
+      - ASYNC_STD_THREAD_COUNT=8
+      # - RUST_LOG=debug
+  db5:
+    image: gossip-async:latest
+    command: 0.0.0.0 db4 db3
+    environment:
+      - ASYNC_STD_THREAD_COUNT=8
+      # - RUST_LOG=debug
