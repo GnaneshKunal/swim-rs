@@ -6,9 +6,10 @@ use async_std::channel::unbounded;
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize)]
-pub enum EventData {
-    String,
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct EventData {
+    data: String,
+    count: usize,
 }
 
 #[async_std::main]
@@ -32,5 +33,9 @@ async fn main() {
 
     let (event_sender, event_receiver) = unbounded();
 
-    futures::try_join!(gossip.start(event_sender), gossip.handler(event_receiver)).unwrap();
+    futures::try_join!(
+        gossip.start::<EventData>(event_sender),
+        gossip.handler(event_receiver),
+    )
+    .unwrap();
 }

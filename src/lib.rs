@@ -22,11 +22,9 @@ use async_std::{
 use message::Message;
 
 use core::fmt::Debug;
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Deserialize, Serialize};
 
-pub trait GenericMsgTrait: Serialize + Clone + DeserializeOwned + Debug {}
-
-pub async fn send_msg<T: GenericMsgTrait + Send + Sync>(
+pub async fn send_msg<T: Send + Sync + Serialize + Clone + Debug>(
     socket: Arc<RwLock<UdpSocket>>,
     to_address: SocketAddr,
     msg: Message<T>,
@@ -36,7 +34,7 @@ pub async fn send_msg<T: GenericMsgTrait + Send + Sync>(
     Ok(socket.send_to(&msg_encoded, to_address).await?)
 }
 
-pub async fn send_msg_to_nodes<T: GenericMsgTrait + Send + Sync>(
+pub async fn send_msg_to_nodes<'a, T: Send + Sync + Serialize + Clone + Debug>(
     socket: Arc<RwLock<UdpSocket>>,
     to_addresses: &[SocketAddr],
     msg: Message<T>,
@@ -48,6 +46,8 @@ pub async fn send_msg_to_nodes<T: GenericMsgTrait + Send + Sync>(
     Ok(())
 }
 
-pub fn bytes_to_msg<T: Sync + Send + GenericMsgTrait>(msg_encoded: &[u8]) -> Message<T> {
+pub fn bytes_to_msg<'a, T: Sync + Send + Serialize + Deserialize<'a> + Debug + Clone>(
+    msg_encoded: &'a [u8],
+) -> Message<T> {
     bincode::deserialize(msg_encoded).unwrap()
 }

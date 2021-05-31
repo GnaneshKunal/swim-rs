@@ -6,18 +6,20 @@ use async_std::{
     task,
 };
 use chrono::Utc;
-use log::{debug, error};
+use log::debug;
 use rand::{seq::IteratorRandom, thread_rng};
 use std::{
+    fmt::Debug,
     marker::{Send, Sync},
     net::{SocketAddr, ToSocketAddrs},
     time::Duration,
 };
 
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
+
 use crate::{
     action::Action, bytes_to_msg, event::Event, membership::MembershipList, message::Message,
     response::Response, send_msg, send_msg_to_nodes, suspected_node::SuspectedNodeList, utils,
-    GenericMsgTrait,
 };
 
 #[derive(Debug)]
@@ -93,7 +95,7 @@ impl Gossip {
         self.inner.read().await.get_random_nodes(&[self.address])
     }
 
-    pub async fn start<T: 'static + Send + Sync + GenericMsgTrait>(
+    pub async fn start<T: 'static + Send + Sync + Serialize + Clone + Debug + DeserializeOwned>(
         &self,
         event_sender: Sender<Event>,
     ) -> Result<(), anyhow::Error> {
@@ -120,7 +122,10 @@ impl Gossip {
         // Ok(event_receiver)
     }
 
-    pub async fn receiver<T: Send + Sync + GenericMsgTrait>(
+    pub async fn receiver<
+        'a,
+        T: 'static + Send + Sync + Serialize + Clone + Debug + DeserializeOwned,
+    >(
         &self,
         socket: Arc<RwLock<UdpSocket>>,
         sx: Sender<Response<T>>,
@@ -131,26 +136,24 @@ impl Gossip {
             debug!("Starting receiver...");
 
             async move {
+                let mut buf = vec![0u8; 1024];
                 loop {
-                    let mut buf = vec![0u8; 1024];
                     let response = async_std::future::timeout(
                         Duration::from_millis(5),
                         socket.write().await.recv_from(&mut buf),
                     )
                     .await;
-
                     match response {
                         Ok(response) => match response {
                             Ok((_, peer)) => {
-                                // let v = buf.to_vec();
-                                let msg = bytes_to_msg(&buf);
+                                let msg: Message<T> = bytes_to_msg(&buf);
 
                                 // send to inbox
                                 sx.send(Response::new(peer, msg)).await?;
                             }
                             _ => (),
                         },
-                        _ => task::sleep(Duration::from_secs(1)).await,
+                        _ => (),
                     }
                 }
                 Ok::<(), anyhow::Error>(())
@@ -160,7 +163,10 @@ impl Gossip {
         Ok(())
     }
 
-    pub async fn checker<T: 'static + Send + Sync + GenericMsgTrait>(
+    pub async fn checker<
+        'a,
+        T: 'static + Send + Sync + Serialize + Debug + Clone + Deserialize<'a>,
+    >(
         &self,
         socket: Arc<RwLock<UdpSocket>>,
     ) -> Result<(), anyhow::Error> {
@@ -221,7 +227,10 @@ impl Gossip {
         self.inner.read().await.members.clone()
     }
 
-    pub async fn transmitter<T: 'static + Send + Sync + GenericMsgTrait>(
+    pub async fn transmitter<
+        'a,
+        T: 'static + Send + Sync + Debug + Serialize + Clone + Deserialize<'a>,
+    >(
         &self,
         socket: Arc<RwLock<UdpSocket>>,
     ) -> Result<(), anyhow::Error> {
@@ -278,7 +287,10 @@ impl Gossip {
         Ok(())
     }
 
-    pub async fn membership_syncer<T: 'static + Send + Sync + GenericMsgTrait>(
+    pub async fn membership_syncer<
+        'a,
+        T: 'static + Send + Sync + Serialize + Debug + Clone + Deserialize<'a>,
+    >(
         &self,
         socket: Arc<RwLock<UdpSocket>>,
     ) -> Result<(), anyhow::Error> {
@@ -311,7 +323,10 @@ impl Gossip {
         Ok(())
     }
 
-    pub async fn processor<T: Send + Sync + GenericMsgTrait>(
+    pub async fn processor<
+        'a,
+        T: 'static + Send + Sync + Serialize + Clone + Debug + Deserialize<'a>,
+    >(
         &self,
         socket: Arc<RwLock<UdpSocket>>,
         rx: Receiver<Response<T>>,
@@ -328,6 +343,7 @@ impl Gossip {
                 loop {
                     let response =
                         async_std::future::timeout(Duration::from_millis(5), rx.recv()).await;
+
                     match response {
                         Ok(response) => match response {
                             Ok(Response {
@@ -570,9 +586,9 @@ impl Gossip {
                                     }
                                 }
                             }
-                            Err(err) => error!("Malformed message: {:?}", err),
+                            Err(_err) => (),
                         },
-                        Err(_err) => task::sleep(Duration::from_millis(100)).await,
+                        Err(_err) => (),
                     }
                 }
                 Ok::<(), anyhow::Error>(())
@@ -588,8 +604,8 @@ impl Gossip {
                 let event = future::timeout(Duration::from_millis(5), event_receiver.recv()).await;
 
                 match event {
-                    Ok(node_event) => match node_event {
-                        Ok(node_event) => match node_event {
+                    Ok(event) => match event {
+                        Ok(event) => match event {
                             Event::Dead(dead_node_addr, dead_node_inform_time) => {
                                 println!("Dead {:?}, {:?}", dead_node_addr, dead_node_inform_time);
                             }
@@ -600,8 +616,8 @@ impl Gossip {
                         },
                         Err(err) => eprintln!("Error: {:?}", err),
                     },
-                    _ => task::sleep(Duration::from_secs(1)).await,
-                };
+                    Err(_err) => (),
+                }
             }
             Ok::<(), anyhow::Error>(())
         }

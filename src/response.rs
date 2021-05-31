@@ -1,15 +1,17 @@
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::net::SocketAddr;
 
 use crate::message::Message;
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct Response<T: 'static + Serialize + Clone + std::marker::Send + std::marker::Sync> {
+use std::fmt::Debug;
+
+#[derive(Debug, Serialize, Clone)]
+pub struct Response<T: Sync + Send + Serialize + Clone + Debug> {
     pub address: SocketAddr,
     pub message: Message<T>,
 }
 
-impl<T: Serialize + Clone + std::marker::Send + std::marker::Sync> Response<T> {
+impl<T: Sync + Send + Serialize + Clone + Debug> Response<T> {
     pub fn new(address: SocketAddr, message: Message<T>) -> Self {
         Self { address, message }
     }
