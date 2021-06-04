@@ -13,7 +13,7 @@ pub struct EventData {
 }
 
 #[async_std::main]
-async fn main() {
+async fn main() -> Result<(), anyhow::Error> {
     env_logger::init();
 
     let args: Vec<String> = std::env::args()
@@ -22,20 +22,23 @@ async fn main() {
         .collect();
 
     if args.len() < 2 {
-        eprintln!("Usage <Port> <Seed nodes...>");
-        return;
+        panic!("Usage <Port> <Seed nodes...>");
     }
 
     let address = args[0].clone();
     let seed_nodes = &args[1..];
 
-    let gossip = Gossip::new(address, seed_nodes);
+    let gossip = Gossip::new(address, seed_nodes).await;
 
     let (event_sender, event_receiver) = unbounded();
+
+    // futures::join!(gossip.await.initialize());
 
     futures::try_join!(
         gossip.start::<EventData>(event_sender),
         gossip.handler(event_receiver),
     )
     .unwrap();
+
+    Ok(())
 }

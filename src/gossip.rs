@@ -67,13 +67,16 @@ impl GossipInner {
 
 #[derive(Debug)]
 pub struct Gossip {
-    pub address: SocketAddr,
-    pub inner: Arc<RwLock<GossipInner>>,
+    socket: Arc<RwLock<UdpSocket>>,
+    inner: Arc<RwLock<GossipInner>>,
 }
 
 impl Gossip {
-    pub fn new<A: ToSocketAddrs>(address: A, seed_nodes: &[A]) -> Self {
+    pub async fn new<A: ToSocketAddrs>(address: A, seed_nodes: &[A]) -> Self {
         let address = address.to_socket_addrs().unwrap().next().unwrap();
+        let socket: Arc<RwLock<UdpSocket>> = Arc::new(RwLock::new(
+            UdpSocket::bind(address).await.expect("It should work"),
+        ));
 
         let seed_nodes: Vec<SocketAddr> = seed_nodes
             .iter()
@@ -81,45 +84,46 @@ impl Gossip {
             .collect();
 
         let members = MembershipList::new(&seed_nodes);
+
         let gossip_inner = GossipInner {
             members,
             suspected_nodes: SuspectedNodeList::new(),
         };
         Self {
-            address,
+            socket,
             inner: Arc::new(RwLock::new(gossip_inner)),
         }
     }
 
+    async fn get_address(&self) -> SocketAddr {
+        self.socket.read().await.local_addr().unwrap()
+    }
+
     pub async fn get_random_nodes(&self) -> Vec<SocketAddr> {
-        self.inner.read().await.get_random_nodes(&[self.address])
+        self.inner
+            .read()
+            .await
+            .get_random_nodes(&[self.get_address().await])
     }
 
     pub async fn start<T: 'static + Send + Sync + Serialize + Clone + Debug + DeserializeOwned>(
         &self,
-        event_sender: Sender<Event>,
+        event_sender: Sender<Event<T>>,
     ) -> Result<(), anyhow::Error> {
         let (sx, rx) = unbounded();
-        // let (event_sender, event_receiver) = unbounded();
 
-        let gossip_node = self;
-        let socket: Arc<RwLock<UdpSocket>> =
-            Arc::new(RwLock::new(UdpSocket::bind(self.address).await?));
-
-        println!("HERE before");
+        let gossip_node = &self;
 
         // `try_join` is better than `join`
         futures::try_join!(
-            gossip_node.transmitter::<T>(socket.clone()),
-            gossip_node.receiver::<T>(socket.clone(), sx),
-            gossip_node.processor::<T>(socket.clone(), rx, event_sender),
-            gossip_node.checker::<T>(socket.clone()),
-            gossip_node.membership_syncer::<T>(socket.clone())
+            gossip_node.transmitter::<T>(),
+            gossip_node.receiver::<T>(sx),
+            gossip_node.processor::<T>(rx, event_sender),
+            gossip_node.checker::<T>(),
+            gossip_node.membership_syncer::<T>(),
         )?;
 
-        println!("HERE");
         Ok(())
-        // Ok(event_receiver)
     }
 
     pub async fn receiver<
@@ -127,11 +131,10 @@ impl Gossip {
         T: 'static + Send + Sync + Serialize + Clone + Debug + DeserializeOwned,
     >(
         &self,
-        socket: Arc<RwLock<UdpSocket>>,
         sx: Sender<Response<T>>,
     ) -> Result<(), anyhow::Error> {
         task::spawn({
-            let socket = socket.clone();
+            let socket = self.socket.clone();
 
             debug!("Starting receiver...");
 
@@ -168,12 +171,12 @@ impl Gossip {
         T: 'static + Send + Sync + Serialize + Debug + Clone + Deserialize<'a>,
     >(
         &self,
-        socket: Arc<RwLock<UdpSocket>>,
     ) -> Result<(), anyhow::Error> {
         task::spawn({
-            let socket = socket.clone();
+            let socket = self.socket.clone();
             let gossip_node = self.inner.clone();
-            let address = self.address.clone();
+            // let address = self.address.clone();
+            let address = self.get_address().await;
 
             debug!("Starting checker...");
 
@@ -232,12 +235,11 @@ impl Gossip {
         T: 'static + Send + Sync + Debug + Serialize + Clone + Deserialize<'a>,
     >(
         &self,
-        socket: Arc<RwLock<UdpSocket>>,
     ) -> Result<(), anyhow::Error> {
         task::spawn({
             let gossip_node = self.inner.clone();
-            let socket = socket.clone();
-            let address = self.address.clone();
+            let socket = self.socket.clone();
+            let address = self.get_address().await;
 
             debug!("Starting transmitter...");
 
@@ -292,11 +294,11 @@ impl Gossip {
         T: 'static + Send + Sync + Serialize + Debug + Clone + Deserialize<'a>,
     >(
         &self,
-        socket: Arc<RwLock<UdpSocket>>,
     ) -> Result<(), anyhow::Error> {
         task::spawn({
-            let address = self.address.clone();
+            let address = self.get_address().await;
             let gossip_node = self.inner.clone();
+            let socket = self.socket.clone();
 
             debug!("Starting membership syncer...");
 
@@ -328,14 +330,13 @@ impl Gossip {
         T: 'static + Send + Sync + Serialize + Clone + Debug + Deserialize<'a>,
     >(
         &self,
-        socket: Arc<RwLock<UdpSocket>>,
         rx: Receiver<Response<T>>,
-        event_sender: Sender<Event>,
+        event_sender: Sender<Event<T>>,
     ) -> Result<(), anyhow::Error> {
         task::spawn({
             let gossip_node = self.inner.clone();
-            let socket = socket.clone();
-            let address = self.address.clone();
+            let socket = self.socket.clone();
+            let address = self.get_address().await;
 
             debug!("Starting processor...");
 
@@ -598,7 +599,34 @@ impl Gossip {
         Ok(())
     }
 
-    pub async fn handler(&self, event_receiver: Receiver<Event>) -> Result<(), anyhow::Error> {
+    pub async fn gossip<
+        'a,
+        T: 'static + Send + Sync + Serialize + Clone + Debug + Deserialize<'a>,
+    >(
+        &self,
+        data: T,
+    ) -> Result<(), anyhow::Error> {
+        send_msg_to_nodes(
+            self.socket.clone(),
+            &self
+                .inner
+                .read()
+                .await
+                .get_random_nodes(&[self.get_address().await]),
+            Message::new(Action::<T>::Data(data)),
+        )
+        .await?;
+
+        Ok::<(), anyhow::Error>(())
+    }
+
+    pub async fn handler<
+        'a,
+        T: 'static + Send + Sync + Serialize + Clone + Debug + Deserialize<'a>,
+    >(
+        &self,
+        event_receiver: Receiver<Event<T>>,
+    ) -> Result<(), anyhow::Error> {
         async move {
             loop {
                 let event = future::timeout(Duration::from_millis(5), event_receiver.recv()).await;
@@ -611,6 +639,9 @@ impl Gossip {
                             }
                             Event::Joined(node_addr, node_timestamp) => {
                                 println!("Joined {:?}, {:?}", node_addr, node_timestamp);
+                            }
+                            Event::Data(data) => {
+                                println!("Data: {:?}", data);
                             }
                             _ => println!("Other events"),
                         },
